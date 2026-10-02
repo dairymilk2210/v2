@@ -1,0 +1,431 @@
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { LogOut, RefreshCw } from "lucide-react";
+import { apiGet, apiPost, apiUrl } from "@/lib/api";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useSeo } from "@/lib/seo";
+import { OverviewTab } from "@/components/admin/OverviewTab";
+import { CustomersTab } from "@/components/admin/CustomersTab";
+import { PartnersTab } from "@/components/admin/PartnersTab";
+import { RatesTab } from "@/components/admin/RatesTab";
+import { UpdatesTab } from "@/components/admin/UpdatesTab";
+import { BlogTab } from "@/components/admin/BlogTab";
+
+interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+}
+
+interface Enquiry {
+  id: string;
+  name: string;
+  mobile: string;
+  email: string;
+  city: string;
+  service: string;
+  requirement?: string | null;
+  message?: string | null;
+  created_at: string;
+  status?: string;
+}
+
+interface Callback {
+  id: string;
+  name: string;
+  mobile: string;
+  preferred_time?: string | null;
+  created_at: string;
+  status?: string;
+}
+
+interface Application {
+  id: string;
+  name: string;
+  email: string;
+  mobile: string;
+  role: string;
+  message?: string | null;
+  created_at: string;
+  status?: string;
+}
+
+interface CareerApplication {
+  id: string;
+  name: string;
+  email: string;
+  application_type: "internship" | "full_time";
+  message?: string | null;
+  resume_filename: string;
+  resume_path: string;
+  submitted_at: string;
+}
+
+interface Leads {
+  enquiries: Enquiry[];
+  callbacks: Callback[];
+  applications: Application[];
+}
+
+const STATUS_STYLES: Record<string, string> = {
+  new: "border-blue-500/40 bg-blue-500/10 text-blue-700",
+  contacted: "border-amber-500/40 bg-amber-500/10 text-amber-700",
+  closed: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+};
+
+function downloadCsv(filename: string, rows: Record<string, unknown>[]) {
+  if (!rows.length) return;
+  const headers = Object.keys(rows[0]);
+  const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = [headers.join(","), ...rows.map((r) => headers.map((h) => esc(r[h])).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function StatusSelect({ kind, id, status }: { kind: "enquiries" | "callbacks" | "applications"; id: string; status?: string }) {
+  const queryClient = useQueryClient();
+  const value = status ?? "new";
+  return (
+    <select
+      data-testid={`status-${kind}-${id.slice(0, 8)}`}
+      aria-label="Lead status"
+      className={`cursor-pointer rounded-full border px-2.5 py-1 text-xs font-medium capitalize outline-none ${STATUS_STYLES[value]}`}
+      value={value}
+      onChange={async (e) => {
+        try {
+          await apiPost(`/leads/${kind}/${id}/status`, { status: e.target.value });
+          queryClient.invalidateQueries({ queryKey: ["admin-leads"] });
+          toast.success(`Marked as ${e.target.value}`);
+        } catch {
+          toast.error("Could not update status");
+        }
+      }}
+    >
+      <option value="new">New</option>
+      <option value="contacted">Contacted</option>
+      <option value="closed">Closed</option>
+    </select>
+  );
+}
+
+function fmtDate(iso: string) {
+  try {
+    return new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+export default function Admin() {
+  useSeo("Admin — Poonji Finance", "Poonji Finance leads dashboard.");
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  const me = useQuery({
+    queryKey: ["admin-me"],
+    queryFn: () => apiGet<AdminUser>("/auth/me"),
+    retry: false,
+  });
+
+  const leads = useQuery({
+    queryKey: ["admin-leads"],
+    queryFn: () => apiGet<Leads>("/leads"),
+    enabled: !!me.data,
+    retry: false,
+  });
+
+  const careerApplications = useQuery({
+    queryKey: ["admin-career-applications"],
+    queryFn: () => apiGet<CareerApplication[]>("/admin/career-applications"),
+    enabled: !!me.data,
+    retry: false,
+  });
+
+  const login = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoggingIn(true);
+    try {
+      const user = await apiPost<AdminUser>("/auth/login", { email, password });
+      queryClient.setQueryData(["admin-me"], user);
+      toast.success(`Welcome, ${user.name}`);
+    } catch {
+      setLoginError("Invalid email or password");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  const logout = async () => {
+    await apiPost("/auth/logout").catch(() => undefined);
+    queryClient.setQueryData(["admin-me"], null);
+    queryClient.removeQueries({ queryKey: ["admin-leads"] });
+    queryClient.invalidateQueries({ queryKey: ["admin-me"] });
+  };
+
+  if (me.isLoading) {
+    return <div className="mx-auto max-w-md px-4 py-32 text-center text-muted-foreground">Checking session…</div>;
+  }
+
+  if (!me.data) {
+    return (
+      <div className="mx-auto max-w-md px-4 py-24 sm:py-32">
+        <div className="glass-card rounded-3xl p-8">
+          <p className="overline-tag">Admin</p>
+          <h1 className="mt-3 font-heading text-2xl font-bold">Leads Dashboard</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Sign in to view enquiries and callback requests.</p>
+          <form onSubmit={login} className="mt-8 grid gap-4" data-testid="admin-login-form">
+            <Input data-testid="admin-email" type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="bg-secondary/60" />
+            <Input data-testid="admin-password" type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="bg-secondary/60" />
+            {loginError && <p data-testid="admin-login-error" className="text-sm text-red-600">{loginError}</p>}
+            <Button data-testid="admin-login-submit" type="submit" disabled={loggingIn}>
+              {loggingIn ? "Signing in…" : "Sign In"}
+            </Button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8" data-testid="admin-dashboard">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <p className="overline-tag">Admin</p>
+          <h1 className="mt-2 font-heading text-3xl font-bold">Leads Dashboard</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Signed in as {me.data.email}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            data-testid="admin-export-enquiries"
+            variant="outline"
+            onClick={() => leads.data && downloadCsv("poonji-enquiries.csv", leads.data.enquiries as unknown as Record<string, unknown>[])}
+          >
+            Enquiries CSV
+          </Button>
+          <Button
+            data-testid="admin-export-callbacks"
+            variant="outline"
+            onClick={() => leads.data && downloadCsv("poonji-callbacks.csv", leads.data.callbacks as unknown as Record<string, unknown>[])}
+          >
+            Callbacks CSV
+          </Button>
+          <Button
+            data-testid="admin-export-applications"
+            variant="outline"
+            onClick={() => leads.data && downloadCsv("poonji-applications.csv", leads.data.applications as unknown as Record<string, unknown>[])}
+          >
+            Applications CSV
+          </Button>
+          <Button data-testid="admin-refresh" variant="outline" onClick={() => leads.refetch()}>
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </Button>
+          <Button data-testid="admin-logout" variant="outline" onClick={logout}>
+            <LogOut className="h-4 w-4" /> Sign Out
+          </Button>
+        </div>
+      </div>
+
+      <Tabs defaultValue="overview" className="mt-10">
+        <TabsList variant="line" className="flex h-auto w-full flex-wrap justify-start gap-x-6">
+          <TabsTrigger value="overview" data-testid="admin-tab-overview">Overview</TabsTrigger>
+          <TabsTrigger value="leads" data-testid="admin-tab-leads">Leads</TabsTrigger>
+          <TabsTrigger value="customers" data-testid="admin-tab-customers">Customers</TabsTrigger>
+          <TabsTrigger value="partners" data-testid="admin-tab-partners">Partners</TabsTrigger>
+          <TabsTrigger value="rates" data-testid="admin-tab-rates">Rates</TabsTrigger>
+          <TabsTrigger value="updates" data-testid="admin-tab-updates">Updates</TabsTrigger>
+          <TabsTrigger value="blog" data-testid="admin-tab-blog">Blog</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="mt-6"><OverviewTab /></TabsContent>
+        <TabsContent value="customers" className="mt-6"><CustomersTab /></TabsContent>
+        <TabsContent value="partners" className="mt-6"><PartnersTab /></TabsContent>
+        <TabsContent value="rates" className="mt-6"><RatesTab /></TabsContent>
+        <TabsContent value="updates" className="mt-6"><UpdatesTab /></TabsContent>
+        <TabsContent value="blog" className="mt-6"><BlogTab /></TabsContent>
+        <TabsContent value="leads" className="mt-6">
+          <Tabs defaultValue="enquiries">
+            <TabsList variant="line">
+          <TabsTrigger value="enquiries" data-testid="admin-tab-enquiries">
+            Enquiries ({leads.data?.enquiries.length ?? 0})
+          </TabsTrigger>
+          <TabsTrigger value="callbacks" data-testid="admin-tab-callbacks">
+            Callbacks ({leads.data?.callbacks.length ?? 0})
+          </TabsTrigger>
+          <TabsTrigger value="applications" data-testid="admin-tab-applications">
+            Applications ({leads.data?.applications.length ?? 0})
+          </TabsTrigger>
+          <TabsTrigger value="career-applications" data-testid="admin-tab-career-applications">
+            Career Applications ({careerApplications.data?.length ?? 0})
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="enquiries" className="mt-6">
+          <div className="overflow-x-auto rounded-2xl border border-border bg-card" data-testid="admin-enquiries-table">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Ref</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Contact</TableHead>
+                  <TableHead>City</TableHead>
+                  <TableHead>Service</TableHead>
+                  <TableHead>Requirement</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Received</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(leads.data?.enquiries ?? []).map((e) => (
+                  <TableRow key={e.id}>
+                    <TableCell className="font-mono text-xs text-gold">{e.id.slice(0, 8).toUpperCase()}</TableCell>
+                    <TableCell className="font-medium">{e.name}</TableCell>
+                    <TableCell className="text-xs">{e.mobile}<br />{e.email}</TableCell>
+                    <TableCell>{e.city}</TableCell>
+                    <TableCell>{e.service}</TableCell>
+                    <TableCell>{e.requirement ?? "—"}</TableCell>
+                    <TableCell><StatusSelect kind="enquiries" id={e.id} status={e.status} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDate(e.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+                {leads.data && leads.data.enquiries.length === 0 && (
+                  <TableRow><TableCell colSpan={8} className="py-10 text-center text-muted-foreground">No enquiries yet.</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+        <TabsContent value="callbacks" className="mt-6">
+          <div className="overflow-x-auto rounded-2xl border border-border bg-card" data-testid="admin-callbacks-table">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Ref</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Mobile</TableHead>
+                  <TableHead>Preferred Time</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Received</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(leads.data?.callbacks ?? []).map((c) => (
+                  <TableRow key={c.id}>
+                    <TableCell className="font-mono text-xs text-gold">{c.id.slice(0, 8).toUpperCase()}</TableCell>
+                    <TableCell className="font-medium">{c.name}</TableCell>
+                    <TableCell>{c.mobile}</TableCell>
+                    <TableCell>{c.preferred_time ?? "—"}</TableCell>
+                    <TableCell><StatusSelect kind="callbacks" id={c.id} status={c.status} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDate(c.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+                {leads.data && leads.data.callbacks.length === 0 && (
+                  <TableRow><TableCell colSpan={6} className="py-10 text-center text-muted-foreground">No callback requests yet.</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+        <TabsContent value="applications" className="mt-6">
+          <div className="overflow-x-auto rounded-2xl border border-border bg-card" data-testid="admin-applications-table">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Ref</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Contact</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead>Note</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Received</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(leads.data?.applications ?? []).map((a) => (
+                  <TableRow key={a.id}>
+                    <TableCell className="font-mono text-xs text-gold">{a.id.slice(0, 8).toUpperCase()}</TableCell>
+                    <TableCell className="font-medium">{a.name}</TableCell>
+                    <TableCell className="text-xs">{a.mobile}<br />{a.email}</TableCell>
+                    <TableCell>{a.role}</TableCell>
+                    <TableCell className="max-w-48 truncate text-xs text-muted-foreground">{a.message ?? "—"}</TableCell>
+                    <TableCell><StatusSelect kind="applications" id={a.id} status={a.status} /></TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDate(a.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+                {leads.data && leads.data.applications.length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No applications yet.</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+        <TabsContent value="career-applications" className="mt-6">
+          <div className="overflow-x-auto rounded-2xl border border-border bg-card" data-testid="admin-career-applications-table">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Ref</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Message</TableHead>
+                  <TableHead>Resume</TableHead>
+                  <TableHead>Submitted</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(careerApplications.data ?? []).map((app) => (
+                  <TableRow key={app.id}>
+                    <TableCell className="font-mono text-xs text-gold">{app.id.slice(0, 8).toUpperCase()}</TableCell>
+                    <TableCell className="font-medium">{app.name}</TableCell>
+                    <TableCell className="text-xs">{app.email}</TableCell>
+                    <TableCell>{app.application_type === "full_time" ? "Full-Time" : "Internship"}</TableCell>
+                    <TableCell className="max-w-52 text-xs text-muted-foreground">{app.message || "—"}</TableCell>
+                    <TableCell>
+                      <button
+                        type="button"
+                        className="text-xs font-medium text-gold underline-offset-2 hover:underline"
+                        onClick={async () => {
+                          const res = await fetch(apiUrl(`/admin/career-applications/${app.id}/download`), { credentials: "include" });
+                          if (!res.ok) {
+                            toast.error("Unable to download this resume.");
+                            return;
+                          }
+                          const blob = await res.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = app.resume_filename || "resume.pdf";
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        Download Resume
+                      </button>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDate(app.submitted_at)}</TableCell>
+                  </TableRow>
+                ))}
+                {careerApplications.data && careerApplications.data.length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="py-10 text-center text-muted-foreground">No career applications yet.</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </TabsContent>
+          </Tabs>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
